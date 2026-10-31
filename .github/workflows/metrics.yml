@@ -13,11 +13,26 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
+
+      # Upstream metrics gives up on fetching repositories after a single GraphQL timeout, which renders
+      # an empty languages list, 0 stars and a bogus "Insufficient token scopes" traffic error.
+      # See .github/metrics/base-pagination.patch
+      - name: Build patched metrics image
+        run: docker build -t metrics:3.34.0 .github/metrics
+
       - name: Metrics embed
-        uses: lowlighter/metrics@latest
+        # Keep in sync with the image tag above and the Dockerfile
+        uses: lowlighter/metrics@v3.34
         with:
           token: ${{ secrets.METRICS_TOKEN }}
-          
+          # Run the locally built metrics:3.34.0 image instead of pulling the unpatched one
+          use_prebuilt_image: no
+          # Smaller queries stay well under GitHub's 10s GraphQL timeout (100 per query takes ~9s)
+          repositories_batch: 20
+          # Retry, then fail without committing, rather than publishing an image with missing stats
+          plugins_errors_fatal: yes
+
           user: tomasvana10
           template: classic
           base: header, activity, community, repositories, metadata

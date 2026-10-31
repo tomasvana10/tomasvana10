@@ -1,0 +1,49 @@
+Fix repository pagination in lowlighter/metrics v3.34 (source/plugins/base/index.mjs)
+
+1. When a repositories query fails (usually a GraphQL timeout), the batch is halved and the loop
+   does `continue`. In a do/while that jumps to the condition, which is false on the first page,
+   so the loop exits with 0 repositories. Everything computed from repositories then renders
+   empty (languages, stars, license...) and the traffic plugin reports "Insufficient token scopes".
+   Fixed by marking the page for a retry.
+2. A page was treated as the last one when it returned fewer than `repositories` (100) results
+   rather than fewer than the batch size, so `repositories_batch` < 100 only ever fetched one page.
+
+diff --git a/source/plugins/base/index.mjs b/source/plugins/base/index.mjs
+index fcd6c6a..bbbf94d 100644
+--- a/source/plugins/base/index.mjs
++++ b/source/plugins/base/index.mjs
+@@ -152,8 +152,9 @@ export default async function({login, graphql, rest, data, q, queries, imports,
+         do {
+           console.debug(`metrics/compute/${login}/base > retrieving ${type} after ${cursor}`)
+           const request = {}
++          const batch = Math.min(repositories, {user: _batch, organization: Math.min(25, _batch)}[account])
+           try {
+-            Object.assign(request, await graphql(queries.base.repositories({login, account, type, after: cursor ? `after: "${cursor}"` : "", repositories: Math.min(repositories, {user: _batch, organization: Math.min(25, _batch)}[account]), ...options})))
++            Object.assign(request, await graphql(queries.base.repositories({login, account, type, after: cursor ? `after: "${cursor}"` : "", repositories: batch, ...options})))
+           }
+           catch (error) {
+             console.debug(`metrics/compute/${login}/base > failed to retrieve ${_batch} repositories after ${cursor}, this is probably due to an API timeout, halving batch`)
+@@ -162,6 +163,8 @@ export default async function({login, graphql, rest, data, q, queries, imports,
+               console.debug(`metrics/compute/${login}/base > failed to retrieve repositories, cannot halve batch anymore`)
+               throw error
+             }
++            //Retry the same page (a bare continue would evaluate the while condition and exit on the first page)
++            pushed = null
+             continue
+           }
+           const {[account]: {[type]: {edges = [], nodes = []} = {}}} = request
+@@ -169,12 +172,12 @@ export default async function({login, graphql, rest, data, q, queries, imports,
+           data.user[type].nodes.push(...nodes)
+           pushed = nodes.length
+           console.debug(`metrics/compute/${login}/base > retrieved ${pushed} ${type} after ${cursor}`)
+-          if (pushed < repositories) {
++          if (pushed < batch) {
+             console.debug(`metrics/compute/${login}/base > retrieved less repositories than expected, probably no more to fetch`)
+             break
+           }
+         }
+-        while ((pushed) && (cursor) && ((data.user.repositories?.nodes?.length ?? 0) + (data.user.repositoriesContributedTo?.nodes?.length ?? 0) < repositories))
++        while ((pushed === null) || ((pushed) && (cursor) && ((data.user.repositories?.nodes?.length ?? 0) + (data.user.repositoriesContributedTo?.nodes?.length ?? 0) < repositories)))
+         //Limit repositories
+         console.debug(`metrics/compute/${login}/base > keeping only ${repositories} ${type}`)
+         data.user[type].nodes.splice(repositories)
